@@ -19,6 +19,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/willf/bloom"
 	"github.com/xrash/smetrics"
 )
 
@@ -28,7 +29,7 @@ type Validator struct {
 	once        sync.Once
 	wordsMaxLen int                 // length of longest word in dictionaries
 	words       map[string]struct{} // map to index parsed dictionaries
-	hashedWords map[string]string   // maps hash-sum to password
+	hashedWords *bloom.BloomFilter  // maps hash-sum to password
 }
 
 // Options contains all the settings for a Validator
@@ -43,6 +44,8 @@ type Options struct {
 	Hashers []hash.Hash
 	// DictionaryPath contains all the dictionaries that will be parsed (default is /usr/share/dict)
 	DictionaryPath string
+	// False positive target for the Bloom filter.
+	HashFalsePositiveRate float64
 	// Check haveibeenpwned.com database
 	CheckHIBP bool
 }
@@ -50,9 +53,10 @@ type Options struct {
 // NewValidator returns a new password validator with default settings
 func NewValidator() *Validator {
 	return NewValidatorWithOpts(Options{
-		MinDist:        -1,
-		DictionaryPath: "/usr/share/dict",
-		CheckHIBP:      false,
+		MinDist:               -1,
+		DictionaryPath:        "/usr/share/dict",
+		HashFalsePositiveRate: -1,
+		CheckHIBP:             false,
 	})
 }
 
@@ -67,11 +71,14 @@ func NewValidatorWithOpts(options Options) *Validator {
 	if options.MinDist < 0 {
 		options.MinDist = 3
 	}
+	if options.HashFalsePositiveRate <= 0 {
+		options.HashFalsePositiveRate = 0.01
+	}
 
 	return &Validator{
 		options:     options,
 		words:       make(map[string]struct{}),
-		hashedWords: make(map[string]string),
+		hashedWords: nil,
 	}
 }
 
@@ -85,6 +92,16 @@ func (v *Validator) indexDictionaries() {
 	if err != nil {
 		return
 	}
+
+	// estimate how many entries we will need in the bloom filter
+	var bloomEntries uint = 1
+	for _, dict := range dicts {
+		lc, _ := lineCount(dict)
+		bloomEntries += lc * uint(len(v.options.Hashers))
+	}
+
+	// Initialize bloom filter
+	v.hashedWords = bloom.NewWithEstimates(bloomEntries, v.options.HashFalsePositiveRate)
 
 	for _, dict := range dicts {
 		file, err := os.Open(dict)
@@ -108,10 +125,11 @@ func (v *Validator) indexDictionaries() {
 			}
 
 			for _, hasher := range v.options.Hashers {
-				v.hashedWords[hashsum(nw, hasher)] = nw
+				v.hashedWords.AddString(hashsum(nw, hasher))
 			}
 		}
 	}
+
 }
 
 // foundInDictionaries returns whether a (mangled) string exists in the indexed dictionaries
@@ -135,8 +153,8 @@ func (v *Validator) foundInDictionaries(s string) error {
 
 	// find hashed dictionary entries
 	if pwindex, err := hex.DecodeString(pw); err == nil {
-		if word, ok := v.hashedWords[string(pwindex)]; ok {
-			return &HashedDictionaryError{ErrHashedDictionary, word}
+		if v.hashedWords != nil && v.hashedWords.TestString(string(pwindex)) {
+			return &HashedDictionaryError{ErrHashedDictionary}
 		}
 	}
 

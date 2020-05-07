@@ -8,7 +8,9 @@
 package crunchy
 
 import (
+	"bufio"
 	"hash"
+	"os"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -68,4 +70,17 @@ func hashsum(s string, hasher hash.Hash) string {
 	hasher.Reset()
 	_, _ = hasher.Write([]byte(s))
 	return string(hasher.Sum(nil))
+}
+
+func lineCount(filename string) (linecount uint, err error) {
+	file, err := os.Open(filename)
+	if err != nil {
+		return 0, err
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		linecount++
+	}
+	return linecount, scanner.Err()
 }

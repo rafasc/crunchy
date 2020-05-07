@@ -20,8 +20,7 @@ type DictionaryError struct {
 
 // HashedDictionaryError wraps an ErrHashedDictionary with contextual information
 type HashedDictionaryError struct {
-	Err  error
-	Word string
+	Err error
 }
 
 func (e *DictionaryError) Error() string {
