@@ -8,10 +8,8 @@
 package crunchy
 
 import (
-	"bufio"
 	"encoding/hex"
 	"hash"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -103,16 +101,12 @@ func (v *Validator) indexDictionaries() {
 	// Initialize bloom filter
 	v.hashedWords = bloom.NewWithEstimates(bloomEntries, v.options.HashFalsePositiveRate)
 
-	for _, dict := range dicts {
-		file, err := os.Open(dict)
-		if err != nil {
-			continue
-		}
-		defer file.Close()
-
-		scanner := bufio.NewScanner(file)
-		for scanner.Scan() {
-			nw := normalize(scanner.Text())
+	// add words from dicts to map
+	hash_pending := make(chan []byte, 100)
+	go func() {
+		c := linesFromFiles(dicts)
+		for word := range c {
+			nw := normalize(word)
 			nwlen := len(nw)
 			if nwlen > v.wordsMaxLen {
 				v.wordsMaxLen = nwlen
@@ -124,12 +118,26 @@ func (v *Validator) indexDictionaries() {
 				v.words[nw] = struct{}{}
 			}
 
-			for _, hasher := range v.options.Hashers {
-				v.hashedWords.AddString(hashsum(nw, hasher))
-			}
+			hash_pending <- []byte(word)
 		}
-	}
+		close(hash_pending)
+	}()
 
+	var wg sync.WaitGroup
+	numjobs := runtime.GOMAXPROCS(0)
+	hwordc := make(chan []byte, numjobs)
+	go func() {
+		wg.Add(numjobs)
+		for j := 0; j < numjobs; j++ {
+			go hashsum(v.options.Hashers, hash_pending, hwordc, &wg)
+		}
+		wg.Wait()
+		close(hwordc)
+	}()
+
+	for w := range hwordc {
+		v.hashedWords.Add(w)
+	}
 }
 
 // foundInDictionaries returns whether a (mangled) string exists in the indexed dictionaries
@@ -153,7 +161,7 @@ func (v *Validator) foundInDictionaries(s string) error {
 
 	// find hashed dictionary entries
 	if pwindex, err := hex.DecodeString(pw); err == nil {
-		if v.hashedWords != nil && v.hashedWords.TestString(string(pwindex)) {
+		if v.hashedWords != nil && v.hashedWords.Test(pwindex) {
 			return &HashedDictionaryError{ErrHashedDictionary}
 		}
 	}

@@ -11,7 +11,9 @@ import (
 	"bufio"
 	"hash"
 	"os"
+	"reflect"
 	"strings"
+	"sync"
 	"unicode"
 	"unicode/utf8"
 )
@@ -65,11 +67,43 @@ func normalize(s string) string {
 	return strings.TrimSpace(strings.ToLower(s))
 }
 
-// hashsum returns the hashed sum of a string
-func hashsum(s string, hasher hash.Hash) string {
-	hasher.Reset()
-	_, _ = hasher.Write([]byte(s))
-	return string(hasher.Sum(nil))
+func hashsum(hashers []hash.Hash, words <-chan []byte, hashes chan<- []byte, wg *sync.WaitGroup) {
+	//make a copy of each hasher
+	hh := make([]hash.Hash, len(hashers))
+	for i, hasher := range hashers {
+		hh[i] = reflect.New(reflect.TypeOf(hasher).Elem()).Interface().(hash.Hash)
+	}
+
+	for word := range words {
+		for _, h := range hh {
+			h.Reset()
+			_, _ = h.Write(word)
+			hashes <- h.Sum(nil)
+		}
+	}
+	wg.Done()
+}
+
+// returns the lines of a file as a channel
+func linesFromFiles(filenames []string) <-chan string {
+	out := make(chan string, 500)
+	go func() {
+		for _, filename := range filenames {
+			file, err := os.Open(filename)
+			if err != nil {
+				continue
+			}
+			defer file.Close()
+
+			scanner := bufio.NewScanner(file)
+			for scanner.Scan() {
+				out <- scanner.Text()
+			}
+
+		}
+		close(out)
+	}()
+	return out
 }
 
 func lineCount(filename string) (linecount uint, err error) {
